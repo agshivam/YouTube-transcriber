@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import streamlit as st
+
+from transcriber import (
+    MODEL_OPTIONS,
+    TranscriptionError,
+    fetch_youtube_captions,
+    load_whisper_model,
+    transcribe_youtube,
+)
+
+st.set_page_config(page_title="YouTube Hindi/English Transcriber", page_icon="🎙️", layout="centered")
+st.title("🎙️ YouTube Hindi, English & Hinglish Transcriber")
+st.caption("Paste a YouTube link. Uses YouTube's Hindi/English captions instantly when they exist; if not, it listens to the audio with Whisper and writes the transcript itself.")
+
+url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
+left, right = st.columns(2)
+with left:
+    model_name = st.selectbox(
+        "Whisper model",
+        MODEL_OPTIONS,
+        index=0,
+        help="Used only when the video has no Hindi/English captions. small runs on the free cloud; large-v3-turbo is most accurate on a strong computer.",
+    )
+with right:
+    language_label = st.selectbox(
+        "Language mode",
+        ["Auto: Hindi / English / Hinglish", "Hindi", "English"],
+    )
+
+language_map = {
+    "Auto: Hindi / English / Hinglish": None,
+    "Hindi": "hi",
+    "English": "en",
+}
+
+with st.expander("Advanced options"):
+    local_model_path = st.text_input(
+        "Optional local faster-whisper model folder",
+        help="Leave blank to download the selected model from Hugging Face on first use.",
+    )
+    beam_size = st.slider("Beam size", 1, 10, 5)
+    force_whisper = st.checkbox(
+        "Skip YouTube captions and always use Whisper",
+        help="Useful when YouTube's auto-captions are poor quality.",
+    )
+
+@st.cache_resource(show_spinner=False)
+def cached_model(selected_model: str, local_path: str):
+    return load_whisper_model(selected_model, local_path or None)
+
+if st.button("Generate transcript", type="primary", use_container_width=True):
+    try:
+        language = language_map[language_label]
+        with st.status("Preparing transcript…", expanded=True) as status:
+            result = None
+            if not force_whisper:
+                st.write("Checking YouTube for Hindi/English captions…")
+                result = fetch_youtube_captions(url, language)
+                if result is None:
+                    st.write("No Hindi/English captions found — generating transcript from audio with Whisper.")
+            if result is None:
+                st.write("Loading speech model (first run downloads it)…")
+                model, runtime = cached_model(model_name, local_model_path.strip())
+                st.write(f"Downloading audio and transcribing on {runtime}…")
+                result = transcribe_youtube(url=url, model=model, language=language, beam_size=beam_size)
+            status.update(label="Transcript ready", state="complete", expanded=False)
+
+        st.success(
+            f"**{result.title}** — source: **{result.source}**. "
+            f"Language: **{result.detected_language or 'unknown'}**."
+        )
+        clean_tab, timed_tab, srt_tab = st.tabs(["Clean transcript", "Timestamps", "SRT subtitles"])
+        with clean_tab:
+            st.text_area("Transcript", result.clean_text, height=360)
+            st.download_button("Download TXT", result.clean_text.encode("utf-8"), result.txt_filename, "text/plain")
+        with timed_tab:
+            st.text_area("Timestamped transcript", result.timestamped_text, height=360)
+            st.download_button(
+                "Download timestamped TXT",
+                result.timestamped_text.encode("utf-8"),
+                result.timestamped_filename,
+                "text/plain",
+            )
+        with srt_tab:
+            st.text_area("SRT", result.srt_text, height=360)
+            st.download_button("Download SRT", result.srt_text.encode("utf-8"), result.srt_filename, "application/x-subrip")
+    except TranscriptionError as exc:
+        st.error(str(exc))
+    except Exception as exc:
+        st.error(f"Unexpected error: {exc}")
