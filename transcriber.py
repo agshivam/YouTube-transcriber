@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Iterable
 from urllib.parse import parse_qs, urlparse
 import html
+import os
 import shutil
 import json
 import re
@@ -130,6 +131,34 @@ def load_whisper_model(model_name: str, local_model_path: str | None = None):
             ) from exc
 
 
+# YouTube player clients to try in order. If YouTube blocks one (HTTP 403 / bot check), the next is tried.
+_CLIENT_FALLBACKS: list[list[str] | None] = [None, ["tv", "web_safari"], ["mweb", "android_vr"]]
+
+
+def _ydl_options(player_client: list[str] | None = None, **extra: Any) -> dict:
+    """Common yt-dlp options: JS runtime (needed by YouTube), optional cookies, client choice."""
+    options: dict[str, Any] = {"quiet": True, "no_warnings": True, "noplaylist": True, "socket_timeout": 30}
+    try:  # pip package "deno" ships the binary; YouTube needs a JS runtime to unlock streams
+        import deno
+
+        options["js_runtimes"] = {"deno": {"path": deno.find_deno_bin()}}
+    except Exception:
+        pass  # yt-dlp will look for deno/node on PATH
+    options["remote_components"] = ["ejs:github"]
+    cookies = os.environ.get("YT_COOKIES_FILE")
+    if cookies and Path(cookies).is_file():
+        options["cookiefile"] = cookies
+    if player_client:
+        options["extractor_args"] = {"youtube": {"player_client": player_client}}
+    options.update(extra)
+    return options
+
+
+def _is_blocked(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(k in text for k in ("403", "forbidden", "not a bot", "sign in to confirm", "po token", "unavailable"))
+
+
 def _download_audio(url: str, directory: str) -> tuple[Path, str]:
     try:
         import yt_dlp
@@ -144,23 +173,35 @@ def _download_audio(url: str, directory: str) -> tuple[Path, str]:
         except Exception as exc:
             raise TranscriptionError("FFmpeg is not available. Install it or run: pip install static-ffmpeg") from exc
     output_template = str(Path(directory) / "audio.%(ext)s")
-    options = {
-        "format": "bestaudio/best",
-        "outtmpl": output_template,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "retries": 3,
-        "fragment_retries": 3,
-        "socket_timeout": 30,
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
-        "postprocessor_args": ["-ar", "16000", "-ac", "1"],
-    }
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except Exception as exc:
-        raise TranscriptionError(f"YouTube audio download failed: {exc}") from exc
+    info, last_exc = None, None
+    for client in _CLIENT_FALLBACKS:
+        options = _ydl_options(
+            client,
+            format="bestaudio/best",
+            outtmpl=output_template,
+            retries=3,
+            fragment_retries=3,
+            postprocessors=[{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
+            postprocessor_args=["-ar", "16000", "-ac", "1"],
+        )
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=True)
+            break
+        except Exception as exc:
+            last_exc = exc
+            for leftover in Path(directory).glob("audio.*"):
+                leftover.unlink(missing_ok=True)
+            if not _is_blocked(exc):
+                break
+    if info is None:
+        hint = (
+            " YouTube is blocking this server. Add YouTube cookies (see README → 'If YouTube blocks the live app') "
+            "or run the app on your own computer."
+            if last_exc is not None and _is_blocked(last_exc)
+            else ""
+        )
+        raise TranscriptionError(f"YouTube audio download failed: {last_exc}.{hint}")
     audio_path = Path(directory) / "audio.wav"
     if not audio_path.is_file() or audio_path.stat().st_size == 0:
         raise TranscriptionError("YouTube audio conversion failed. FFmpeg did not create a valid WAV file.")
@@ -317,36 +358,54 @@ def _extract_info(url: str) -> dict:
         import yt_dlp
     except ImportError as exc:
         raise TranscriptionError("Required packages are missing. Run: pip install -r requirements.txt") from exc
-    options = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True, "socket_timeout": 30}
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            return ydl.extract_info(url, download=False) or {}
-    except Exception as exc:
-        raise TranscriptionError(f"Could not read the YouTube video: {exc}") from exc
+    last_exc: Exception | None = None
+    for client in _CLIENT_FALLBACKS:
+        try:
+            with yt_dlp.YoutubeDL(_ydl_options(client, skip_download=True)) as ydl:
+                return ydl.extract_info(url, download=False) or {}
+        except Exception as exc:
+            last_exc = exc
+            if not _is_blocked(exc):
+                break
+    raise TranscriptionError(f"Could not read the YouTube video: {last_exc}")
 
 
 def _download_text(track_url: str) -> str:
     import yt_dlp
 
-    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+    with yt_dlp.YoutubeDL(_ydl_options()) as ydl:
         return ydl.urlopen(track_url).read().decode("utf-8", errors="replace")
 
 
-def fetch_youtube_captions(url: str, language: str | None = None) -> TranscriptResult | None:
-    """Return a transcript built from YouTube's own Hindi/English captions, or None if none exist."""
+def fetch_youtube_captions(
+    url: str, language: str | None = None, notes: list[str] | None = None
+) -> TranscriptResult | None:
+    """Return a transcript built from YouTube's own Hindi/English captions, or None if none exist.
+
+    Reasons for returning None are appended to ``notes`` so the UI can show them.
+    """
+    notes = notes if notes is not None else []
     checked_url = validate_youtube_url(url)
     if language not in {None, "hi", "en"}:
         raise TranscriptionError("Language must be auto, Hindi, or English.")
     info = _extract_info(checked_url)
     track = pick_caption_track(info, language)
     if track is None:
+        available = sorted(set((info.get("subtitles") or {})) | {
+            k for k, v in (info.get("automatic_captions") or {}).items()
+            if v and not _is_translated((v[0] or {}).get("url", ""))
+        })
+        notes.append("This video has no Hindi/English captions on YouTube"
+                     + (f" (found: {', '.join(available[:6])})." if available else "."))
         return None
     try:
         raw = _download_text(track.url)
         segments = parse_json3(raw) if track.ext == "json3" else parse_vtt(raw)
-    except Exception:
-        return None  # caption download/parse failed -> caller falls back to Whisper
+    except Exception as exc:  # caption download/parse failed -> caller falls back to Whisper
+        notes.append(f"{track.kind} exist, but YouTube refused to send them ({str(exc)[:120]}).")
+        return None
     if not segments:
+        notes.append(f"{track.kind} exist, but YouTube sent them empty (it often does this to cloud servers).")
         return None
     title = str(info.get("title") or "YouTube transcript")
     return build_outputs(title, segments, track.language, source=track.kind)

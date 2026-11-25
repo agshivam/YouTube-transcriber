@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import tempfile
+
 import streamlit as st
 
 from transcriber import (
@@ -9,6 +12,17 @@ from transcriber import (
     load_whisper_model,
     transcribe_youtube,
 )
+
+# Optional: YouTube cookies stored as a Streamlit secret (YT_COOKIES = contents of a cookies.txt file).
+try:
+    _cookies = st.secrets.get("YT_COOKIES", "")
+except Exception:
+    _cookies = ""
+if _cookies and not os.environ.get("YT_COOKIES_FILE"):
+    _path = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+    with open(_path, "w", encoding="utf-8") as fh:
+        fh.write(_cookies)
+    os.environ["YT_COOKIES_FILE"] = _path
 
 st.set_page_config(page_title="YouTube Hindi/English Transcriber", page_icon="🎙️", layout="centered")
 st.title("🎙️ YouTube Hindi, English & Hinglish Transcriber")
@@ -57,9 +71,12 @@ if st.button("Generate transcript", type="primary", use_container_width=True):
             result = None
             if not force_whisper:
                 st.write("Checking YouTube for Hindi/English captions…")
-                result = fetch_youtube_captions(url, language)
+                notes: list[str] = []
+                result = fetch_youtube_captions(url, language, notes)
                 if result is None:
-                    st.write("No Hindi/English captions found — generating transcript from audio with Whisper.")
+                    for note in notes:
+                        st.write(note)
+                    st.write("Generating the transcript from the audio with Whisper instead.")
             if result is None:
                 st.write("Loading speech model (first run downloads it)…")
                 model, runtime = cached_model(model_name, local_model_path.strip())

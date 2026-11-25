@@ -71,3 +71,48 @@ def test_fetch_captions_validates_input():
         t.fetch_youtube_captions("https://example.com/x")
     with pytest.raises(t.TranscriptionError):
         t.fetch_youtube_captions("https://youtu.be/abc", "fr")
+
+def test_options_include_js_runtime_and_cookies(monkeypatch, tmp_path):
+    c = tmp_path / "c.txt"; c.write_text("# Netscape HTTP Cookie File\n")
+    monkeypatch.setenv("YT_COOKIES_FILE", str(c))
+    o = t._ydl_options(["tv"], skip_download=True)
+    assert o["cookiefile"] == str(c) and o["skip_download"]
+    assert o["extractor_args"]["youtube"]["player_client"] == ["tv"]
+    assert "remote_components" in o
+
+def test_extract_info_retries_other_clients_when_blocked(monkeypatch):
+    import yt_dlp
+    calls = []
+    class FakeYDL:
+        def __init__(self, opts): self.opts = opts
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def extract_info(self, url, download):
+            calls.append(self.opts.get("extractor_args"))
+            if len(calls) < 3: raise Exception("HTTP Error 403: Forbidden")
+            return {"title": "ok"}
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    assert t._extract_info("https://youtu.be/abc") == {"title": "ok"}
+    assert len(calls) == 3
+
+def test_extract_info_stops_on_non_block_error(monkeypatch):
+    import yt_dlp
+    class FakeYDL:
+        def __init__(self, opts): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def extract_info(self, url, download): raise Exception("Video is private")
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    with pytest.raises(t.TranscriptionError, match="private"):
+        t._extract_info("https://youtu.be/abc")
+
+def test_caption_notes_explain_why(monkeypatch):
+    monkeypatch.setattr(t, "_extract_info", lambda url: {"subtitles": {"fr": fmt("fr")}})
+    notes = []
+    assert t.fetch_youtube_captions("https://youtu.be/abc", None, notes) is None
+    assert "no Hindi/English captions" in notes[0] and "fr" in notes[0]
+    monkeypatch.setattr(t, "_extract_info", lambda url: {"subtitles": {"hi": fmt("hi")}})
+    monkeypatch.setattr(t, "_download_text", lambda u: json.dumps({"events": []}))
+    notes = []
+    assert t.fetch_youtube_captions("https://youtu.be/abc", None, notes) is None
+    assert "empty" in notes[0]

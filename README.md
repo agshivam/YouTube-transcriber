@@ -1,6 +1,6 @@
 # 🎙️ YouTube Hindi / English / Hinglish Transcriber
 
-**Live app:** https://yt-transcriber.streamlit.app  ·  Built with Python, Streamlit, yt-dlp and faster-whisper
+**Live app:** https://youtube-transcript-live.streamlit.app  ·  Built with Python, Streamlit, yt-dlp and faster-whisper
 
 Paste any YouTube link and get a clean transcript, a timestamped transcript and SRT subtitles.
 
@@ -20,12 +20,28 @@ Tick *Advanced options → Skip YouTube captions* to force Whisper when YouTube'
 1. Go to https://share.streamlit.io and sign in with GitHub.
 2. **Create app → Deploy a public app from GitHub**.
 3. Repository `agshivam/youtube-transcriber`, branch `main`, main file `app.py`.
-4. **Advanced settings → Python 3.12**. App URL: `yt-transcriber` (or any free name).
+4. **Advanced settings → Python 3.12**. App URL: any free name (live one: `youtube-transcript-live`).
 5. Click **Deploy**. `packages.txt` installs FFmpeg; `requirements.txt` installs the rest.
 
 Cloud notes: the free machine has limited memory, so the app defaults to the `small` Whisper model.
-YouTube sometimes blocks downloads from cloud servers. If you see a "Sign in to confirm you're not a bot"
-error on the live app, run it locally (below) for that video.
+The app installs Deno (via pip), which YouTube now requires for downloads, and retries with other
+YouTube player clients if one is blocked.
+
+### If YouTube blocks the live app (HTTP 403 / "confirm you're not a bot")
+YouTube blocks many cloud servers. Giving the app YouTube cookies usually fixes it:
+1. On a laptop, open YouTube in a **private/incognito window** and sign in with a spare Google account
+   (not your main one; heavy use can get an account flagged).
+2. Export cookies for youtube.com in Netscape `cookies.txt` format (for example with the
+   "Get cookies.txt LOCALLY" browser extension), then close the private window.
+3. In Streamlit Cloud: **Manage app → Settings → Secrets**, and paste:
+   ```toml
+   YT_COOKIES = """
+   (paste the whole cookies.txt content here)
+   """
+   ```
+4. Save. The app restarts and uses the cookies. Cookies expire after some weeks; repeat when blocked again.
+
+Running the app on your own computer avoids the block completely.
 
 ## Run locally
 ### Requirements
