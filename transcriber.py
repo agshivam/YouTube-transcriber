@@ -156,7 +156,9 @@ def _ydl_options(player_client: list[str] | None = None, **extra: Any) -> dict:
 
 def _is_blocked(exc: Exception) -> bool:
     text = str(exc).lower()
-    return any(k in text for k in ("403", "forbidden", "not a bot", "sign in to confirm", "po token", "unavailable"))
+    keys = ("403", "forbidden", "not a bot", "sign in to confirm", "po token", "unavailable",
+            "needs to be reloaded", "reload", "429", "too many requests", "precondition")
+    return any(k in text for k in keys)
 
 
 def _download_audio(url: str, directory: str) -> tuple[Path, str]:
@@ -305,6 +307,11 @@ def pick_caption_track(info: dict, language: str | None = None) -> CaptionTrack 
     if language in {"hi", "en"}:
         for fmt in candidates(automatic, language, True):
             return CaptionTrack(language, f"YouTube auto-translated captions ({_LANG_NAMES[language]})", fmt[1], fmt[0])
+        # Requested language missing: use the other language rather than nothing.
+        other = "en" if language == "hi" else "hi"
+        for tracks, label in ((manual, "uploaded by creator"), (automatic, "auto-generated")):
+            for fmt in candidates(tracks, other, False):
+                return CaptionTrack(other, f"YouTube captions ({_LANG_NAMES[other]}, {label})", fmt[1], fmt[0])
     return None
 
 
@@ -407,5 +414,11 @@ def fetch_youtube_captions(
     if not segments:
         notes.append(f"{track.kind} exist, but YouTube sent them empty (it often does this to cloud servers).")
         return None
+    if language in {"hi", "en"} and track.language != language:
+        notes.append(
+            f"No {_LANG_NAMES[language]} captions on this video, so the {_LANG_NAMES[track.language]} captions are "
+            f"shown. For a {_LANG_NAMES[language]} transcript from the audio, tick Advanced options → "
+            "'Skip YouTube captions and always use Whisper'."
+        )
     title = str(info.get("title") or "YouTube transcript")
     return build_outputs(title, segments, track.language, source=track.kind)

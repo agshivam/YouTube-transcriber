@@ -116,3 +116,21 @@ def test_caption_notes_explain_why(monkeypatch):
     notes = []
     assert t.fetch_youtube_captions("https://youtu.be/abc", None, notes) is None
     assert "empty" in notes[0]
+
+def test_hindi_requested_falls_back_to_english_captions(monkeypatch):
+    info = {"title": "V", "automatic_captions": {"en": fmt("en")}}
+    track = t.pick_caption_track(info, "hi")
+    assert track.language == "en" and "auto-generated" in track.kind
+    monkeypatch.setattr(t, "_extract_info", lambda url: info)
+    monkeypatch.setattr(t, "_download_text", lambda u: json.dumps(
+        {"events": [{"tStartMs": 0, "dDurationMs": 1000, "segs": [{"utf8": "hello"}]}]}))
+    notes = []
+    r = t.fetch_youtube_captions("https://youtu.be/abc", "hi", notes)
+    assert r.clean_text == "hello" and "No Hindi captions" in notes[0]
+
+def test_hindi_translation_preferred_over_english_fallback():
+    info = {"automatic_captions": {"en": fmt("en"), "hi": fmt("hi", True)}}
+    assert "auto-translated" in t.pick_caption_track(info, "hi").kind
+
+def test_reload_error_counts_as_blocked():
+    assert t._is_blocked(Exception("ERROR: [youtube] x: The page needs to be reloaded."))

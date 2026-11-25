@@ -69,9 +69,9 @@ if st.button("Generate transcript", type="primary", use_container_width=True):
         language = language_map[language_label]
         with st.status("Preparing transcript…", expanded=True) as status:
             result = None
+            notes: list[str] = []
             if not force_whisper:
                 st.write("Checking YouTube for Hindi/English captions…")
-                notes: list[str] = []
                 result = fetch_youtube_captions(url, language, notes)
                 if result is None:
                     for note in notes:
@@ -83,6 +83,9 @@ if st.button("Generate transcript", type="primary", use_container_width=True):
                 st.write(f"Downloading audio and transcribing on {runtime}…")
                 result = transcribe_youtube(url=url, model=model, language=language, beam_size=beam_size)
             status.update(label="Transcript ready", state="complete", expanded=False)
+        if not force_whisper and result.source.startswith("YouTube"):
+            for note in notes:
+                st.info(note)
 
         st.success(
             f"**{result.title}** — source: **{result.source}**. "
