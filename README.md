@@ -27,7 +27,17 @@ Cloud notes: the free machine has limited memory, so the app defaults to the `sm
 The app installs Deno (via pip), which YouTube now requires for downloads, and retries with other
 YouTube player clients if one is blocked.
 
-### If YouTube blocks the live app (HTTP 403 / "confirm you're not a bot")
+### Supadata: makes the live app work when YouTube blocks it (recommended, free)
+YouTube blocks audio downloads from Streamlit's servers. Supadata fetches captions, or writes an AI
+transcript from the audio, on its own servers.
+1. Sign up at https://supadata.ai (free plan: 100 credits/month, no card) and copy your API key.
+2. In Streamlit Cloud: **Manage app → ⋮ → Settings → Secrets**, paste `SUPADATA_API_KEY = "your-key"`, and save.
+
+How the app uses it: YouTube captions in your language are fetched directly (free). If they're missing, or
+"Skip YouTube captions" is ticked, Supadata makes an AI transcript. Cost: 1 credit for captions,
+2 credits per video minute for an AI transcript (about 50 minutes of video per month on the free plan).
+
+### Alternative: YouTube cookies (if YouTube blocks the live app) (HTTP 403 / "confirm you're not a bot")
 YouTube blocks many cloud servers. Giving the app YouTube cookies usually fixes it:
 1. On a laptop, open YouTube in a **private/incognito window** and sign in with a spare Google account
    (not your main one; heavy use can get an account flagged).

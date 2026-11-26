@@ -8,6 +8,7 @@ import streamlit as st
 from transcriber import (
     MODEL_OPTIONS,
     TranscriptionError,
+    fetch_supadata_transcript,
     fetch_youtube_captions,
     load_whisper_model,
     transcribe_youtube,
@@ -23,6 +24,11 @@ if _cookies and not os.environ.get("YT_COOKIES_FILE"):
     with open(_path, "w", encoding="utf-8") as fh:
         fh.write(_cookies)
     os.environ["YT_COOKIES_FILE"] = _path
+
+try:
+    SUPADATA_KEY = st.secrets.get("SUPADATA_API_KEY", "") or os.environ.get("SUPADATA_API_KEY", "")
+except Exception:
+    SUPADATA_KEY = os.environ.get("SUPADATA_API_KEY", "")
 
 st.set_page_config(page_title="YouTube Hindi/English Transcriber", page_icon="🎙️", layout="centered")
 st.title("🎙️ YouTube Hindi, English & Hinglish Transcriber")
@@ -73,19 +79,33 @@ if st.button("Generate transcript", type="primary", use_container_width=True):
             if not force_whisper:
                 st.write("Checking YouTube for Hindi/English captions…")
                 result = fetch_youtube_captions(url, language, notes)
-                if result is None:
-                    for note in notes:
-                        st.write(note)
-                    st.write("Generating the transcript from the audio with Whisper instead.")
+                for note in notes:
+                    st.write(note)
+            exact = result is not None and (language is None or result.detected_language == language)
+            if not exact and SUPADATA_KEY:
+                mode = "generate" if (force_whisper or language) else "auto"
+                st.write(
+                    "Creating an AI transcript from the audio with Supadata (2 free credits per video minute)…"
+                    if mode == "generate" else "Fetching the transcript with Supadata…"
+                )
+                try:
+                    title = result.title if result is not None else "YouTube transcript"
+                    result = fetch_supadata_transcript(url, SUPADATA_KEY, language, mode, notes, title=title)
+                except TranscriptionError as exc:
+                    if result is None:
+                        raise
+                    st.write(f"Supadata failed ({exc}); showing the captions found instead.")
             if result is None:
                 st.write("Loading speech model (first run downloads it)…")
                 model, runtime = cached_model(model_name, local_model_path.strip())
                 st.write(f"Downloading audio and transcribing on {runtime}…")
                 result = transcribe_youtube(url=url, model=model, language=language, beam_size=beam_size)
             status.update(label="Transcript ready", state="complete", expanded=False)
-        if not force_whisper and result.source.startswith("YouTube"):
-            for note in notes:
+        shown = set()
+        for note in notes:
+            if note.startswith(("No ", "Supadata returned")) and note not in shown:
                 st.info(note)
+                shown.add(note)
 
         st.success(
             f"**{result.title}** — source: **{result.source}**. "

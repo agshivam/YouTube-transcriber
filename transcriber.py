@@ -198,8 +198,8 @@ def _download_audio(url: str, directory: str) -> tuple[Path, str]:
                 break
     if info is None:
         hint = (
-            " YouTube is blocking this server. Add YouTube cookies (see README → 'If YouTube blocks the live app') "
-            "or run the app on your own computer."
+            " YouTube is blocking this server. Add a free Supadata API key (README → 'Supadata') "
+            "or YouTube cookies, or run the app on your own computer."
             if last_exc is not None and _is_blocked(last_exc)
             else ""
         )
@@ -422,3 +422,102 @@ def fetch_youtube_captions(
         )
     title = str(info.get("title") or "YouTube transcript")
     return build_outputs(title, segments, track.language, source=track.kind)
+
+
+# ---------------------------------------------------------------------------
+# Supadata (optional): fetches/generates transcripts on Supadata's servers, so it
+# keeps working when YouTube blocks the hosting server. Needs SUPADATA_API_KEY.
+# Free plan: 100 credits/month. Native captions = 1 credit; AI transcript = 2 credits per video minute.
+# ---------------------------------------------------------------------------
+
+SUPADATA_BASE = "https://api.supadata.ai/v1/transcript"
+
+
+def _http_get_json(url: str, api_key: str) -> tuple[int, dict]:
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url, headers={"x-api-key": api_key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = response.read().decode("utf-8") or "{}"
+            return response.status, json.loads(body)
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode("utf-8") or "{}")
+        except Exception:
+            return exc.code, {}
+
+
+def fetch_supadata_transcript(
+    url: str,
+    api_key: str,
+    language: str | None = None,
+    mode: str = "auto",
+    notes: list[str] | None = None,
+    http_get=_http_get_json,
+    sleep=None,
+    max_wait_seconds: int = 900,
+    title: str = "YouTube transcript",
+) -> TranscriptResult:
+    """Get a transcript from Supadata. mode: native (captions only), generate (AI from audio), auto (both)."""
+    import time
+    from urllib.parse import urlencode
+
+    notes = notes if notes is not None else []
+    sleep = sleep or time.sleep
+    checked_url = validate_youtube_url(url)
+    if mode not in {"native", "generate", "auto"}:
+        raise TranscriptionError("Supadata mode must be native, generate or auto.")
+    params = {"url": checked_url, "mode": mode}
+    if language in {"hi", "en"}:
+        params["lang"] = language
+    status, data = http_get(f"{SUPADATA_BASE}?{urlencode(params)}", api_key)
+
+    if status == 202 and data.get("jobId"):
+        job_url = f"{SUPADATA_BASE}/{data['jobId']}"
+        waited = 0
+        while True:
+            status, data = http_get(job_url, api_key)
+            state = data.get("status")
+            if state == "completed" or (status == 200 and "content" in data and state is None):
+                status = 200
+                break
+            if state == "failed":
+                raise TranscriptionError(f"Supadata could not transcribe this video: {data.get('error')}")
+            if waited >= max_wait_seconds:
+                raise TranscriptionError("Supadata is taking too long. Try again in a few minutes.")
+            sleep(2)
+            waited += 2
+
+    if status == 206:
+        raise TranscriptionError("Supadata found no captions for this video (try with Whisper / AI mode).")
+    if status in {401, 403} and "api" in json.dumps(data).lower() and "key" in json.dumps(data).lower():
+        raise TranscriptionError("Supadata API key is invalid. Check SUPADATA_API_KEY in the app's Secrets.")
+    if status == 429 or (status == 402):
+        raise TranscriptionError("Supadata free credits are used up for this month.")
+    if status == 404:
+        raise TranscriptionError("Supadata says this video does not exist or is private.")
+    if status != 200:
+        detail = data.get("message") or data.get("error") or data.get("details") or status
+        raise TranscriptionError(f"Supadata request failed: {detail}")
+
+    chunks = data.get("content") or []
+    if isinstance(chunks, str):
+        chunks = [{"text": chunks, "offset": 0, "duration": 0}]
+    segments = [
+        CaptionSegment(
+            (c.get("offset") or 0) / 1000,
+            ((c.get("offset") or 0) + (c.get("duration") or 0)) / 1000,
+            re.sub(r"\s+", " ", html.unescape(c.get("text") or "")).strip(),
+        )
+        for c in chunks
+    ]
+    segments = [s for s in segments if s.text]
+    if not segments:
+        raise TranscriptionError("No speech was detected in this video.")
+    lang = _base_lang(data.get("lang") or "") or language
+    if language in {"hi", "en"} and lang and lang != language:
+        notes.append(f"Supadata returned {_LANG_NAMES.get(lang, lang)} instead of {_LANG_NAMES[language]}.")
+    label = "Supadata AI transcript" if mode == "generate" else "Supadata (YouTube captions or AI)"
+    return build_outputs(title, segments, lang, source=label)
