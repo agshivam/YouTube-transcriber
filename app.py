@@ -4,7 +4,10 @@ import os
 import tempfile
 from pathlib import Path
 
+import json
+
 import streamlit as st
+import streamlit.components.v1 as components
 
 from transcriber import (
     MODEL_OPTIONS,
@@ -164,6 +167,38 @@ if st.button("Generate transcript", type="primary", use_container_width=True):
     except Exception as exc:
         st.error(f"Unexpected error: {exc}")
 
+def copy_button(text: str, label: str = "📋 Copy transcript", key: str = "copy") -> None:
+    """A tap-friendly copy-to-clipboard button (works on iPad/iPhone Safari too)."""
+    payload = json.dumps(text).replace("</", "<\\/")
+    components.html(
+        f"""
+        <button id="b" style="width:100%;padding:10px 14px;font-size:16px;border-radius:8px;cursor:pointer;
+          border:1px solid #E5484D;background:#fff;color:#E5484D;font-family:sans-serif;font-weight:600">{label}</button>
+        <script>
+        const text = {payload};
+        const btn = document.getElementById("b");
+        function done(ok) {{
+          btn.textContent = ok ? "✅ Copied!" : "Copy failed: select the text and copy manually";
+          setTimeout(() => btn.textContent = {json.dumps(label)}, 2500);
+        }}
+        function fallback() {{
+          const ta = document.createElement("textarea");
+          ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+          let ok = false; try {{ ok = document.execCommand("copy"); }} catch (e) {{}}
+          document.body.removeChild(ta); done(ok);
+        }}
+        btn.addEventListener("click", () => {{
+          if (navigator.clipboard && window.isSecureContext) {{
+            navigator.clipboard.writeText(text).then(() => done(true), fallback);
+          }} else {{ fallback(); }}
+        }});
+        </script>
+        """,
+        height=52,
+    )
+
+
 result = st.session_state.get("result")
 if result is not None:
     for note in st.session_state.get("notes", []):
@@ -174,12 +209,15 @@ if result is not None:
     clean_tab, timed_tab, srt_tab = st.tabs(["Clean transcript", "Timestamps", "SRT subtitles"])
     with clean_tab:
         st.text_area("Transcript", result.clean_text, height=360)
+        copy_button(result.clean_text, key="copy_clean")
         st.download_button("Download TXT", result.clean_text.encode("utf-8"), result.txt_filename, "text/plain")
     with timed_tab:
         st.text_area("Timestamped transcript", result.timestamped_text, height=360)
+        copy_button(result.timestamped_text, "📋 Copy with timestamps", key="copy_timed")
         st.download_button(
             "Download timestamped TXT", result.timestamped_text.encode("utf-8"), result.timestamped_filename, "text/plain"
         )
     with srt_tab:
         st.text_area("SRT", result.srt_text, height=360)
+        copy_button(result.srt_text, "📋 Copy SRT", key="copy_srt")
         st.download_button("Download SRT", result.srt_text.encode("utf-8"), result.srt_filename, "application/x-subrip")
