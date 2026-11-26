@@ -27,7 +27,21 @@ Cloud notes: the free machine has limited memory, so the app defaults to the `sm
 The app installs Deno (via pip), which YouTube now requires for downloads, and retries with other
 YouTube player clients if one is blocked.
 
-### Supadata: makes the live app work when YouTube blocks it (recommended, free)
+### Groq: free, fast transcription of hours of audio (recommended)
+Groq runs Whisper large-v3 (very good for Hindi and Hinglish) for free: about 8 hours of audio per day,
+no card needed. The app cuts long audio into 10-minute parts automatically and waits when Groq's free
+per-hour limit is reached, so even multi-hour recordings finish.
+1. Sign up at https://console.groq.com, open **API Keys → Create API Key**, and copy it.
+2. In Streamlit Cloud: **Manage app → ⋮ → Settings → Secrets**, paste `GROQ_API_KEY = "gsk_..."`, and save.
+
+### Getting the audio on iPad (when YouTube blocks the live app)
+YouTube blocks audio downloads from Streamlit's servers, so for videos without captions:
+1. Save the video's audio to the **Files** app (any YouTube-to-MP3 website or app that saves to Files works;
+   only download videos you have the right to use).
+2. In the app choose **Source → Upload audio/video file**, pick the file, select Hindi, and tap Generate.
+Files up to 500 MB are accepted (about 10+ hours of MP3 audio).
+
+### Supadata (optional): small free quota, works directly from a link
 YouTube blocks audio downloads from Streamlit's servers. Supadata fetches captions, or writes an AI
 transcript from the audio, on its own servers.
 1. Sign up at https://supadata.ai (free plan: 100 credits/month, no card) and copy your API key.

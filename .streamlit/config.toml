@@ -3,7 +3,7 @@ primaryColor = "#E5484D"
 base = "light"
 
 [server]
-maxUploadSize = 50
+maxUploadSize = 500
 
 [browser]
 gatherUsageStats = false

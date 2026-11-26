@@ -521,3 +521,189 @@ def fetch_supadata_transcript(
         notes.append(f"Supadata returned {_LANG_NAMES.get(lang, lang)} instead of {_LANG_NAMES[language]}.")
     label = "Supadata AI transcript" if mode == "generate" else "Supadata (YouTube captions or AI)"
     return build_outputs(title, segments, lang, source=label)
+
+
+# ---------------------------------------------------------------------------
+# Groq Whisper (optional, free): whisper-large-v3 on Groq's servers. Free plan allows
+# about 8 hours of audio per day (2 hours per hour), 25 MB per request, so long audio
+# is cut into 10-minute MP3 chunks first. Needs GROQ_API_KEY.
+# ---------------------------------------------------------------------------
+
+GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_MODEL = "whisper-large-v3"
+CHUNK_SECONDS = 600
+
+
+def _ensure_ffmpeg() -> str:
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    try:
+        import static_ffmpeg
+
+        static_ffmpeg.add_paths()
+    except Exception as exc:
+        raise TranscriptionError("FFmpeg is not available.") from exc
+    path = shutil.which("ffmpeg")
+    if not path:
+        raise TranscriptionError("FFmpeg is not available.")
+    return path
+
+
+def media_duration(path: str | Path) -> float:
+    """Duration in seconds, read from ffmpeg's banner (ffprobe may be missing)."""
+    import subprocess
+
+    out = subprocess.run([_ensure_ffmpeg(), "-hide_banner", "-i", str(path)], capture_output=True, text=True)
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out.stderr)
+    if not m:
+        raise TranscriptionError("Could not read this file. Upload an audio or video file (mp3, m4a, mp4, wav…).")
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def split_audio(path: str | Path, out_dir: str | Path, chunk_seconds: int = CHUNK_SECONDS) -> list[tuple[Path, float]]:
+    """Convert any audio/video to 16 kHz mono MP3 chunks. Returns [(chunk_path, start_offset_seconds)]."""
+    import subprocess
+
+    duration = media_duration(path)
+    chunks: list[tuple[Path, float]] = []
+    start = 0.0
+    index = 0
+    while start < duration - 0.5:
+        target = Path(out_dir) / f"chunk_{index:04d}.mp3"
+        cmd = [_ensure_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}",
+               "-t", str(chunk_seconds), "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(target)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not target.exists():
+            raise TranscriptionError(f"Audio conversion failed: {result.stderr.strip()[:200]}")
+        chunks.append((target, start))
+        start += chunk_seconds
+        index += 1
+    if not chunks:
+        raise TranscriptionError("The audio is empty.")
+    return chunks
+
+
+def _groq_post(chunk: Path, api_key: str, language: str | None) -> tuple[int, dict, dict]:
+    import requests
+
+    data = {"model": GROQ_MODEL, "response_format": "verbose_json", "temperature": "0"}
+    if language in {"hi", "en"}:
+        data["language"] = language
+    with open(chunk, "rb") as fh:
+        response = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            data=data,
+            files={"file": (chunk.name, fh, "audio/mpeg")},
+            timeout=300,
+        )
+    try:
+        body = response.json()
+    except Exception:
+        body = {"error": {"message": response.text[:200]}}
+    return response.status_code, body, dict(response.headers)
+
+
+def _retry_seconds(headers: dict, body: dict) -> float:
+    for key in ("retry-after", "Retry-After"):
+        if headers.get(key):
+            try:
+                return float(headers[key])
+            except ValueError:
+                pass
+    message = json.dumps(body)
+    m = re.search(r"try again in (?:(\d+)m)?(\d+(?:\.\d+)?)s", message)
+    if m:
+        return int(m.group(1) or 0) * 60 + float(m.group(2))
+    return 30.0
+
+
+def transcribe_file_groq(
+    path: str | Path,
+    api_key: str,
+    language: str | None = None,
+    title: str = "Transcript",
+    progress=None,
+    post=_groq_post,
+    sleep=None,
+    max_wait_per_chunk: float = 3900,
+) -> TranscriptResult:
+    """Transcribe a local audio/video file of any length with Groq's free Whisper API."""
+    import time
+
+    sleep = sleep or time.sleep
+    if not api_key:
+        raise TranscriptionError("GROQ_API_KEY is missing. Add it in the app's Secrets.")
+    progress = progress or (lambda done, total, msg: None)
+    with TemporaryDirectory(prefix="groq_chunks_") as tmp:
+        chunks = split_audio(path, tmp)
+        segments: list[CaptionSegment] = []
+        detected = None
+        for i, (chunk, offset) in enumerate(chunks):
+            progress(i, len(chunks), f"Transcribing part {i + 1} of {len(chunks)}…")
+            waited = 0.0
+            while True:
+                try:
+                    status, body, headers = post(chunk, api_key, language)
+                except Exception as exc:  # network hiccup: retry for up to 2 minutes
+                    if waited >= 120:
+                        raise TranscriptionError(f"Could not reach Groq: {exc}") from exc
+                    sleep(10)
+                    waited += 10
+                    continue
+                if status == 200:
+                    break
+                if status == 429:
+                    pause = min(max(_retry_seconds(headers, body), 5.0), 600.0)
+                    if waited + pause > max_wait_per_chunk:
+                        raise TranscriptionError(
+                            "Groq's free daily limit (about 8 hours of audio) is reached. Try again tomorrow; "
+                            f"{i} of {len(chunks)} parts were done."
+                        )
+                    progress(i, len(chunks), f"Groq free limit pause: waiting {int(pause)} s, then continuing…")
+                    sleep(pause)
+                    waited += pause
+                    continue
+                if status == 401:
+                    raise TranscriptionError("Groq API key is invalid. Check GROQ_API_KEY in the app's Secrets.")
+                if status >= 500 and waited < 120:
+                    sleep(10)
+                    waited += 10
+                    continue
+                message = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else body
+                raise TranscriptionError(f"Groq transcription failed: {message}")
+            detected = detected or _GROQ_LANGS.get(str(body.get("language", "")).lower(), body.get("language"))
+            parts = body.get("segments") or []
+            if not parts and body.get("text"):
+                parts = [{"start": 0, "end": min(CHUNK_SECONDS, body.get("duration") or 0), "text": body["text"]}]
+            for seg in parts:
+                text = re.sub(r"\s+", " ", seg.get("text") or "").strip()
+                if text:
+                    segments.append(CaptionSegment(offset + float(seg.get("start") or 0), offset + float(seg.get("end") or 0), text))
+        progress(len(chunks), len(chunks), "Done")
+    if not segments:
+        raise TranscriptionError("No speech was detected in this audio.")
+    return build_outputs(title, segments, language or detected, source=f"Groq Whisper ({GROQ_MODEL})")
+
+
+_GROQ_LANGS = {"hindi": "hi", "english": "en", "urdu": "ur", "punjabi": "pa"}
+
+
+def download_youtube_audio(url: str, directory: str) -> tuple[Path, str]:
+    """Download a YouTube video's audio as 16 kHz mono WAV. Returns (path, title)."""
+    return _download_audio(validate_youtube_url(url), directory)
+
+
+def transcribe_file_local(path: str | Path, model: Any, language: str | None = None, beam_size: int = 5,
+                          title: str = "Transcript") -> TranscriptResult:
+    """Transcribe a local audio/video file with the on-server faster-whisper model."""
+    _ensure_ffmpeg()
+    try:
+        segments, info = model.transcribe(
+            str(path), language=language, beam_size=int(beam_size), vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500}, condition_on_previous_text=True,
+        )
+        return build_outputs(title, segments, getattr(info, "language", language))
+    except Exception as exc:
+        raise TranscriptionError(f"Speech transcription failed: {exc}") from exc
