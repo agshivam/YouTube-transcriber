@@ -4,6 +4,14 @@
 
 Paste any YouTube link and get a clean transcript, a timestamped transcript and SRT subtitles.
 
+## ⚡ Easiest: paste a link in Google Colab (free, hours of audio)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/agshivam/YouTube-transcriber/blob/main/Colab_Transcriber.ipynb)
+
+Open the link (works in Safari on iPad), tap ▶ on **Step 1**, paste YouTube link(s) in **Step 2**, tap ▶.
+It downloads the audio itself and transcribes it with Whisper large-v3 on Google's free GPU,
+then saves TXT, timestamps and SRT (ZIP download or Google Drive).
+If YouTube blocks the download: **Runtime → Disconnect and delete runtime**, then run both steps again.
+
 ## How it works
 1. Paste a YouTube link and click **Generate transcript**.
 2. The app first checks YouTube for Hindi or English captions (creator-uploaded first, then auto-generated).

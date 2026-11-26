@@ -36,6 +36,7 @@ if _cookies and not os.environ.get("YT_COOKIES_FILE"):
         fh.write(_cookies)
     os.environ["YT_COOKIES_FILE"] = _path
 
+COLAB_URL = "https://colab.research.google.com/github/agshivam/YouTube-transcriber/blob/main/Colab_Transcriber.ipynb"
 GROQ_KEY = _secret("GROQ_API_KEY")
 SUPADATA_KEY = _secret("SUPADATA_API_KEY")
 
@@ -45,6 +46,8 @@ st.caption(
     "Paste a YouTube link or upload an audio/video file. YouTube's own Hindi/English captions are used when "
     "they exist; otherwise the audio is transcribed with Whisper AI."
 )
+
+st.markdown(f"**Long videos without captions?** Use the [free Google Colab version]({COLAB_URL}): paste a link, it downloads and transcribes on its own.")
 
 source_mode = st.radio("Source", ["YouTube link", "Upload audio/video file"], horizontal=True)
 url = ""
@@ -128,8 +131,9 @@ def run_link(notes: list[str]):
                 return result
             if blocked:
                 raise TranscriptionError(
-                    "YouTube is blocking audio downloads from this server. Switch Source to "
-                    "'Upload audio/video file' and upload the audio instead (README → 'Getting the audio on iPad')."
+                    "YouTube is blocking audio downloads from this server. Use the free Google Colab version "
+                    f"(paste the link there and it downloads the audio itself): {COLAB_URL} — or switch Source to "
+                    "'Upload audio/video file'."
                 ) from exc
             raise
         st.write("Audio downloaded. Transcribing…")
