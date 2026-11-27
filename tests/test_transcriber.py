@@ -45,12 +45,14 @@ def test_safe_stem_has_fallback_and_limit():
     assert len(transcriber.safe_stem("a" * 200)) == 120
 
 def test_end_to_end_orchestration_with_mock_download(monkeypatch, tmp_path):
+    import subprocess
     wav = tmp_path / "audio.wav"
-    wav.write_bytes(b"RIFFfake")
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=duration=2",
+                    "-ac", "1", "-ar", "16000", str(wav)], check=True)
     monkeypatch.setattr(transcriber, "_download_audio", lambda url, directory: (wav, "Demo Video"))
     class Model:
         def transcribe(self, path, **kwargs):
-            assert path == str(wav)
+            assert path.dtype.name == "float32" and abs(len(path) - 32000) < 400  # decoded by FFmpeg, not PyAV
             assert kwargs["language"] is None
             assert kwargs["beam_size"] == 5
             assert kwargs["vad_filter"] is True
@@ -69,3 +71,20 @@ def test_language_and_beam_validation(monkeypatch):
 def test_local_model_path_validation(tmp_path):
     with pytest.raises(transcriber.TranscriptionError, match="does not exist"):
         transcriber.load_whisper_model("small", str(tmp_path / "missing"))
+
+
+def test_local_file_transcription_decodes_mp3_with_ffmpeg(tmp_path):
+    import subprocess
+    mp3 = tmp_path / "EXAM 01 (1).mp3"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=duration=3",
+                    "-ac", "2", "-ar", "44100", str(mp3)], check=True)
+    seen = {}
+    class Model:
+        def transcribe(self, audio, **kwargs):
+            seen["n"] = len(audio); seen["max"] = float(abs(audio).max())
+            return iter([Segment(0, 3, "परीक्षा परिणाम")]), SimpleNamespace(language="hi")
+    r = transcriber.transcribe_file_local(mp3, Model(), "hi", title="EXAM 01")
+    assert r.clean_text == "परीक्षा परिणाम" and abs(seen["n"] - 48000) < 2000 and 0 < seen["max"] <= 1.0
+    bad = tmp_path / "bad.mp3"; bad.write_text("nope")
+    with pytest.raises(transcriber.TranscriptionError, match="Could not read"):
+        transcriber.transcribe_file_local(bad, Model())

@@ -220,7 +220,7 @@ def transcribe_youtube(url: str, model: Any, language: str | None = None, beam_s
         audio_path, title = _download_audio(checked_url, temp_dir)
         try:
             segments, info = model.transcribe(
-                str(audio_path),
+                load_audio_array(audio_path),
                 language=language,
                 beam_size=int(beam_size),
                 vad_filter=True,
@@ -695,13 +695,28 @@ def download_youtube_audio(url: str, directory: str) -> tuple[Path, str]:
     return _download_audio(validate_youtube_url(url), directory)
 
 
+def load_audio_array(path: str | Path):
+    """Decode any audio/video to 16 kHz mono float32 with FFmpeg (avoids PyAV version breakages)."""
+    import subprocess
+
+    import numpy as np
+
+    cmd = [_ensure_ffmpeg(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(path),
+           "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0 or not result.stdout:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()[:200]
+        raise TranscriptionError(f"Could not read this file. Upload an audio or video file (mp3, m4a, mp4, wav…). {detail}")
+    return np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def transcribe_file_local(path: str | Path, model: Any, language: str | None = None, beam_size: int = 5,
                           title: str = "Transcript") -> TranscriptResult:
     """Transcribe a local audio/video file with the on-server faster-whisper model."""
-    _ensure_ffmpeg()
+    audio = load_audio_array(path)
     try:
         segments, info = model.transcribe(
-            str(path), language=language, beam_size=int(beam_size), vad_filter=True,
+            audio, language=language, beam_size=int(beam_size), vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500}, condition_on_previous_text=True,
         )
         return build_outputs(title, segments, getattr(info, "language", language))
