@@ -54,14 +54,17 @@ st.markdown(f"**Long videos without captions?** Use the [free Google Colab versi
 
 source_mode = st.radio("Source", ["YouTube link", "Upload audio/video file"], horizontal=True)
 url = ""
-upload = None
+uploads = []
 if source_mode == "YouTube link":
     url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
 else:
-    upload = st.file_uploader(
-        "Audio or video file (mp3, m4a, mp4, wav, ogg, webm… up to 500 MB)",
+    uploads = st.file_uploader(
+        "Audio or video files: select one or many (mp3, m4a, mp4, wav, ogg, webm… up to 500 MB each)",
         type=["mp3", "m4a", "mp4", "wav", "ogg", "opus", "webm", "aac", "flac", "mov", "mkv", "mpeg", "mpga"],
-    )
+        accept_multiple_files=True,
+    ) or []
+    if len(uploads) > 1:
+        st.caption(f"{len(uploads)} files selected. They are transcribed one after another; keep this tab open.")
 
 language_label = st.selectbox("Language", ["Auto: Hindi / English / Hinglish", "Hindi", "English"])
 language = {"Auto: Hindi / English / Hinglish": None, "Hindi": "hi", "English": "en"}[language_label]
@@ -143,29 +146,64 @@ def run_link(notes: list[str]):
         return transcribe_audio_file(audio_path, title)
 
 
+def save_upload(upload, folder: str) -> Path:
+    path = Path(folder) / f"input{Path(upload.name).suffix.lower() or '.bin'}"
+    upload.seek(0)
+    with open(path, "wb") as fh:
+        for block in iter(lambda: upload.read(8 * 1024 * 1024), b""):
+            fh.write(block)
+    return path
+
+
 if st.button("Generate transcript", type="primary", use_container_width=True):
     notes: list[str] = []
-    st.session_state["result"] = None
+    st.session_state["results"] = []
+    st.session_state["failed"] = []
     try:
-        with st.status("Preparing transcript…", expanded=True) as status:
-            if source_mode == "YouTube link":
-                result = run_link(notes)
-            else:
-                if upload is None:
-                    raise TranscriptionError("Choose an audio or video file first.")
-                with tempfile.TemporaryDirectory(prefix="upload_") as tmp:
-                    path = Path(tmp) / f"input{Path(upload.name).suffix.lower() or '.bin'}"
-                    with open(path, "wb") as fh:
-                        for block in iter(lambda: upload.read(8 * 1024 * 1024), b""):
-                            fh.write(block)
-                    result = transcribe_audio_file(path, safe_stem(Path(upload.name).stem) or "Transcript")
-            status.update(label="Transcript ready", state="complete", expanded=False)
-        st.session_state["result"] = result
+        if source_mode == "YouTube link":
+            with st.status("Preparing transcript…", expanded=True) as status:
+                st.session_state["results"] = [run_link(notes)]
+                status.update(label="Transcript ready", state="complete", expanded=False)
+        else:
+            if not uploads:
+                raise TranscriptionError("Choose one or more audio or video files first.")
+            if not GROQ_KEY and len(uploads) > 1:
+                st.warning("Without a GROQ_API_KEY each file is transcribed slowly on this server. Add the free key for batches.")
+            overall = st.progress(0.0, text=f"0 of {len(uploads)} files done")
+            for i, upload in enumerate(uploads, 1):
+                with st.status(f"[{i}/{len(uploads)}] {upload.name}", expanded=True) as status:
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="upload_") as tmp:
+                            r = transcribe_audio_file(save_upload(upload, tmp), safe_stem(Path(upload.name).stem) or "Transcript")
+                        st.session_state["results"].append(r)
+                        status.update(label=f"✅ {upload.name}", state="complete", expanded=False)
+                    except Exception as exc:  # keep going with the other files
+                        st.session_state["failed"].append(f"{upload.name}: {exc}")
+                        status.update(label=f"❌ {upload.name}: {exc}", state="error", expanded=False)
+                overall.progress(i / len(uploads), text=f"{i} of {len(uploads)} files done")
         st.session_state["notes"] = [n for n in dict.fromkeys(notes) if n.startswith(("No ", "Supadata returned", "YouTube blocked"))]
     except TranscriptionError as exc:
         st.error(str(exc))
     except Exception as exc:
         st.error(f"Unexpected error: {exc}")
+
+
+def zip_results(results) -> bytes:
+    import io
+    import zipfile
+
+    buffer, used = io.BytesIO(), set()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
+        for r in results:
+            stem, n = Path(r.txt_filename).stem, 2
+            while stem in used:
+                stem, n = f"{Path(r.txt_filename).stem} ({n})", n + 1
+            used.add(stem)
+            z.writestr(f"{stem}.txt", r.clean_text)
+            z.writestr(f"{stem}_timestamps.txt", r.timestamped_text)
+            z.writestr(f"{stem}.srt", r.srt_text)
+    return buffer.getvalue()
+
 
 def copy_button(text: str, label: str = "📋 Copy transcript", key: str = "copy") -> None:
     """A tap-friendly copy-to-clipboard button (works on iPad/iPhone Safari too)."""
@@ -199,25 +237,43 @@ def copy_button(text: str, label: str = "📋 Copy transcript", key: str = "copy
     )
 
 
-result = st.session_state.get("result")
-if result is not None:
-    for note in st.session_state.get("notes", []):
-        st.info(note)
+def show_result(result, k: str) -> None:
     st.success(
         f"**{result.title}** — source: **{result.source}**. Language: **{result.detected_language or 'unknown'}**."
     )
     clean_tab, timed_tab, srt_tab = st.tabs(["Clean transcript", "Timestamps", "SRT subtitles"])
     with clean_tab:
-        st.text_area("Transcript", result.clean_text, height=360)
-        copy_button(result.clean_text, key="copy_clean")
-        st.download_button("Download TXT", result.clean_text.encode("utf-8"), result.txt_filename, "text/plain")
+        st.text_area("Transcript", result.clean_text, height=360, key=f"t_clean_{k}")
+        copy_button(result.clean_text, key=f"copy_clean_{k}")
+        st.download_button("Download TXT", result.clean_text.encode("utf-8"), result.txt_filename, "text/plain",
+                           key=f"d_txt_{k}", on_click="ignore")
     with timed_tab:
-        st.text_area("Timestamped transcript", result.timestamped_text, height=360)
-        copy_button(result.timestamped_text, "📋 Copy with timestamps", key="copy_timed")
-        st.download_button(
-            "Download timestamped TXT", result.timestamped_text.encode("utf-8"), result.timestamped_filename, "text/plain"
-        )
+        st.text_area("Timestamped transcript", result.timestamped_text, height=360, key=f"t_timed_{k}")
+        copy_button(result.timestamped_text, "📋 Copy with timestamps", key=f"copy_timed_{k}")
+        st.download_button("Download timestamped TXT", result.timestamped_text.encode("utf-8"),
+                           result.timestamped_filename, "text/plain", key=f"d_ts_{k}", on_click="ignore")
     with srt_tab:
-        st.text_area("SRT", result.srt_text, height=360)
-        copy_button(result.srt_text, "📋 Copy SRT", key="copy_srt")
-        st.download_button("Download SRT", result.srt_text.encode("utf-8"), result.srt_filename, "application/x-subrip")
+        st.text_area("SRT", result.srt_text, height=360, key=f"t_srt_{k}")
+        copy_button(result.srt_text, "📋 Copy SRT", key=f"copy_srt_{k}")
+        st.download_button("Download SRT", result.srt_text.encode("utf-8"), result.srt_filename,
+                           "application/x-subrip", key=f"d_srt_{k}", on_click="ignore")
+
+
+results = st.session_state.get("results") or []
+for note in st.session_state.get("notes", []) if results else []:
+    st.info(note)
+for failure in st.session_state.get("failed", []):
+    st.error(failure)
+if len(results) == 1:
+    show_result(results[0], "0")
+elif len(results) > 1:
+    st.subheader(f"{len(results)} transcripts ready")
+    st.download_button("⬇️ Download all as ZIP (TXT + timestamps + SRT)", zip_results(results), "transcripts.zip",
+                       "application/zip", type="primary", use_container_width=True,
+                       on_click="ignore")
+    all_text = "\n\n".join(f"===== {r.title} =====\n{r.clean_text}" for r in results)
+    copy_button(all_text, "📋 Copy all transcripts", key="copy_all")
+    names = [f"{i}. {r.title}" for i, r in enumerate(results, 1)]
+    pick = st.selectbox("View one transcript", names)
+    idx = names.index(pick)
+    show_result(results[idx], str(idx))
